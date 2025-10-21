@@ -22,8 +22,6 @@ if "source" not in st.session_state:
 
 st.title("🚗 Regresión lineal simple: mpg en función de hp")
 st.caption("Sube un CSV con columnas **hp** y **mpg** para reemplazar los datos. Todo se actualiza automáticamente.")
-
-# Nuevo texto visible para confirmar la fuente actual
 st.markdown(f"**Fuente de datos actual:** `{st.session_state.source}`")
 
 # -------------------- CONTROLES DE ORIGEN --------------------
@@ -62,25 +60,65 @@ if up is not None:
 
 df = st.session_state.train_df
 
-# -------------------- PREVISIÓN Y MÉTRICAS --------------------
+# -------------------- PREVIA --------------------
 st.subheader("Vista previa de los datos actuales")
 st.dataframe(df.head(20), use_container_width=True)
 
+# -------------------- ENTRENAMIENTO --------------------
+st.subheader("Entrenamiento del modelo")
 test_size = st.slider("Proporción de test", 0.1, 0.5, 0.25, 0.05)
-X = df[["hp"]].to_numpy(dtype=float)
-Y = df["mpg"].to_numpy(dtype=float)
+use_norm = st.checkbox("Normalizar X e Y (z-score)", value=False,
+                       help="Se entrena en escala estandarizada, pero métricas y predicciones se reportan en la escala original.")
 
-X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=test_size, random_state=42)
-model = LinearRegression().fit(X_train, Y_train)
+# Matrices en escala original
+X_raw = df[["hp"]].to_numpy(dtype=float)
+Y_raw = df["mpg"].to_numpy(dtype=float)
 
-y_pred = model.predict(X_test)
-mse = mean_squared_error(Y_test, y_pred)
+# Split
+X_train_raw, X_test_raw, Y_train_raw, Y_test_raw = train_test_split(
+    X_raw, Y_raw, test_size=test_size, random_state=42
+)
+
+if use_norm:
+    # z-score con medias y desvs del entrenamiento
+    x_mu, x_sd = X_train_raw.mean(), X_train_raw.std(ddof=0)
+    y_mu, y_sd = Y_train_raw.mean(), Y_train_raw.std(ddof=0)
+
+    # Evitar sd=0
+    x_sd = x_sd if x_sd > 0 else 1.0
+    y_sd = y_sd if y_sd > 0 else 1.0
+
+    X_train = (X_train_raw - x_mu) / x_sd
+    Y_train = (Y_train_raw - y_mu) / y_sd
+    X_test = (X_test_raw - x_mu) / x_sd
+
+    model = LinearRegression().fit(X_train, Y_train)
+
+    # Predicciones en espacio normalizado y luego desnormalizar Y
+    y_pred_norm = model.predict(X_test)
+    y_pred = y_pred_norm * y_sd + y_mu
+
+    # Coeficientes en escala original para mostrar ecuación: y = b0 + b1*x
+    # Si y = (a0 + a1*zx)*y_sd + y_mu y zx = (x - x_mu)/x_sd
+    # => y = (y_mu + y_sd*a0 - y_sd*a1*x_mu/x_sd) + (y_sd*a1/x_sd) * x
+    a1 = float(model.coef_[0])
+    a0 = float(model.intercept_)
+    b1 = float((y_sd * a1) / x_sd)
+    b0 = float(y_mu + y_sd * a0 - b1 * x_mu)
+
+else:
+    # Sin normalizar
+    model = LinearRegression().fit(X_train_raw, Y_train_raw)
+    y_pred = model.predict(X_test_raw)
+    b1 = float(model.coef_[0])
+    b0 = float(model.intercept_)
+
+# -------------------- MÉTRICAS EN ESCALA ORIGINAL --------------------
+mse = mean_squared_error(Y_test_raw, y_pred)
 rmse = float(np.sqrt(mse))
-r2 = float(r2_score(Y_test, y_pred))
-b1 = float(model.coef_[0])
-b0 = float(model.intercept_)
+r2 = float(r2_score(Y_test_raw, y_pred))
 
-st.subheader("Ecuación del modelo")
+st.subheader("Ecuación del modelo (escala original)")
 st.latex(r"\text{mpg} = \beta_0 + \beta_1 \cdot \text{hp}")
 st.write(f"**β₀:** {b0:,.4f} | **β₁:** {b1:,.4f}")
 
@@ -89,8 +127,12 @@ m1.metric("R² (test)", f"{r2:.4f}")
 m2.metric("RMSE (test)", f"{rmse:.4f}")
 
 # -------------------- GRÁFICA --------------------
-grid = pd.DataFrame({"hp": np.linspace(X.min(), X.max(), 100)})
-grid["mpg"] = model.predict(grid[["hp"]])
+grid = pd.DataFrame({"hp": np.linspace(X_raw.min(), X_raw.max(), 100)})
+if use_norm:
+    z = (grid[["hp"]].to_numpy(dtype=float) - X_train_raw.mean()) / (X_train_raw.std(ddof=0) if X_train_raw.std(ddof=0) > 0 else 1.0)
+    grid["mpg"] = (model.predict(z) * (Y_train_raw.std(ddof=0) if Y_train_raw.std(ddof=0) > 0 else 1.0)) + Y_train_raw.mean()
+else:
+    grid["mpg"] = model.predict(grid[["hp"]])
 
 scatter = alt.Chart(df).mark_circle(size=60, opacity=0.6).encode(
     x=alt.X("hp", title="hp"),
@@ -102,34 +144,13 @@ line = alt.Chart(grid).mark_line().encode(x="hp", y="mpg")
 st.subheader("Ajuste del modelo con los datos actuales")
 st.altair_chart(scatter + line, use_container_width=True)
 
-# -------------------- PREDICCIÓN --------------------
-st.header("Predicción con datos nuevos")
-x_new = st.number_input("hp (valor único)", value=float(np.median(X)))
-y_new = model.predict(np.array([[x_new]])).item()
+# -------------------- PREDICCIÓN SENCILLA --------------------
+st.header("Predicción con dato nuevo")
+x_new = st.number_input("hp (valor único)", value=float(np.median(X_raw)))
+if use_norm:
+    xz = (np.array([[x_new]]) - X_train_raw.mean()) / (X_train_raw.std(ddof=0) if X_train_raw.std(ddof=0) > 0 else 1.0)
+    y_new = model.predict(xz).item()
+    y_new = y_new * (Y_train_raw.std(ddof=0) if Y_train_raw.std(ddof=0) > 0 else 1.0) + Y_train_raw.mean()
+else:
+    y_new = model.predict(np.array([[x_new]])).item()
 st.success(f"Predicción de mpg para hp={x_new:,.2f}: **{y_new:,.4f}**")
-
-st.markdown("Carga un CSV de **predicción** con columna `hp` para obtener `mpg`:")
-pred_file = st.file_uploader("CSV para predecir (columna: hp)", type=["csv"], key="pred")
-if pred_file is not None:
-    try:
-        pdf = pd.read_csv(pred_file)
-        if "hp" not in pdf.columns:
-            st.error("El CSV de predicción debe tener columna 'hp'.")
-        else:
-            tmp = pdf[["hp"]].copy()
-            tmp["hp"] = pd.to_numeric(tmp["hp"], errors="coerce")
-            tmp = tmp.dropna()
-            if len(tmp) == 0:
-                st.error("No hay valores numéricos válidos en 'hp'.")
-            else:
-                out = tmp.copy()
-                out["mpg_pred"] = model.predict(out[["hp"]])
-                st.dataframe(out, use_container_width=True)
-                st.download_button(
-                    "Descargar predicciones (CSV)",
-                    data=out.to_csv(index=False).encode("utf-8"),
-                    file_name="predicciones_mpg.csv",
-                    mime="text/csv"
-                )
-    except Exception as e:
-        st.error(f"Error en predicción: {e}")
